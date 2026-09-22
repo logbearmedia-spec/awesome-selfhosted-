@@ -1,0 +1,11 @@
+# config/persona.toml is deliberately NOT ignored. It holds no secrets — every
+# credential in it is a ${ENV_VAR} reference — and the scheduled workflow needs
+# it in the repo. It is the account's content plan, so it belongs in git.
+
+# Generated media. out/state.json is the posting history and IS committed.
+out/media/
+
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.venv/

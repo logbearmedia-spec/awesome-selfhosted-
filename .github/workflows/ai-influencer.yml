@@ -1,0 +1,84 @@
+name: ai-influencer
+
+# The scheduler. Cron here is UTC, so it will not follow daylight saving in the
+# persona's timezone; the planner's grace window absorbs the one-hour drift.
+# Run it more often than you post — `run` only acts when a slot is actually due,
+# which also means a missed firing can still be caught by the next one.
+on:
+  schedule:
+    - cron: "0,30 17,18 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Render and caption, but do not publish"
+        type: boolean
+        default: true
+      date:
+        description: "Override the date (YYYY-MM-DD)"
+        type: string
+        default: ""
+
+concurrency:
+  group: ai-influencer
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: ai-influencer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e '.[captions]'
+
+      - name: Check the setup
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          MEDIA_BASE_URL: ${{ secrets.MEDIA_BASE_URL }}
+        run: influencer -c config/persona.toml doctor
+
+      - name: Post
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          MEDIA_BASE_URL: ${{ secrets.MEDIA_BASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          influencer -c config/persona.toml run \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
+
+      # The state file is the account's memory: without persisting it, every
+      # run would think it is the first one and repeat the same post.
+      - name: Persist the posting history
+        run: |
+          if [ -z "$(git status --porcelain out/state.json)" ]; then
+            echo "no new posts to record"
+            exit 0
+          fi
+          git config user.name "ai-influencer[bot]"
+          git config user.email "noreply@users.noreply.github.com"
+          git add out/state.json
+          git commit -m "chore: record posted slot"
+          # The branch may have moved while the render was running.
+          for attempt in 1 2 3; do
+            git pull --rebase origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep $((attempt * 5))
+          done
+          echo "could not persist state after 3 attempts" >&2
+          exit 1
